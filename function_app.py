@@ -5,6 +5,38 @@ import json
 import os
 from datetime import datetime, timezone
 
+def get_alert_details(alert):
+    """
+    Extracts the header text and active period from an alert entity.
+    
+    This helper function navigates the complex nested structure of an alert entity
+    to pull out both the alert message and when it's scheduled to occur.
+
+    Args:
+        alert (dict): A single alert entity from the MTA API response
+
+    Returns:
+        tuple: (header_text, active_period_text) - both strings, or None if not found
+    """
+    alert = alert.get('alert', {})
+
+    header_text = None
+    header_translations = alert.get('header_text', {}).get('translation', [])
+    for translation in header_translations:
+        if translation.get('language') == 'en':
+            header_text = translation.get('text')
+            break
+    
+    active_period_text = None
+    mercury_alert = alert.get('transit_realtime.mercury_alert', {})
+    period_translations = mercury_alert.get('human_readable_active_period', {}).get('translation', [])
+    for translation in period_translations:
+        if translation.get('language') == 'en':
+            active_period_text = translation.get('text')
+            break
+    
+    return header_text, active_period_text
+
 def filter_seven_train_alerts(alerts_data):
     """
     Filters the alerts data to only include alerts related to the 7 train.
@@ -51,8 +83,7 @@ app = func.FunctionApp()
 @app.schedule(schedule="0 */1 * * * *", arg_name="mytimer", run_on_startup=True)
 def mta_alert_check(mytimer: func.TimerRequest) -> None:
     """
-    Fetches MTA subway alerts and optionally saves them to a file for analysis.
-    The JSON data is saved if the SAVE_RESPONSE environment variable is set to 'true'.
+    Fetches MTA subway alerts and filters for alerts related to the 7 train.
     """
     # Log when our function starts
     utc_timestamp = datetime.now(timezone.utc).isoformat()
@@ -64,16 +95,18 @@ def mta_alert_check(mytimer: func.TimerRequest) -> None:
         
         logging.info('Fetching alerts from MTA...')
         response = requests.get(url)
-        
-        # Check if the request was successful
         response.raise_for_status()
-        
-        # Get the raw JSON response
         alerts = response.json()
 
         seven_train_alerts = filter_seven_train_alerts(alerts)
-
         logging.info(f'Found {len(seven_train_alerts)} alerts for the 7 train.')
+
+        for alert in seven_train_alerts:
+            header_text, active_period = get_alert_details(alert)
+            if header_text and active_period:
+                logging.info(f'Alert: {header_text}')
+                logging.info(f'Active Period: {active_period}')
+                logging.info('---')
         
         
     except requests.exceptions.RequestException as e:
