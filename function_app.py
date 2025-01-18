@@ -10,7 +10,7 @@ app = func.FunctionApp()
 
 # Register the function with the app
 @app.function_name(name="mta_alert_check")
-@app.schedule(schedule="0 */1 * * * *", arg_name="mytimer", run_on_startup=True)
+@app.schedule(schedule="0 */10 * * * *", arg_name="mytimer", run_on_startup=True)
 def mta_alert_check(mytimer: func.TimerRequest) -> None:
     """
     Fetches MTA subway alerts and optionally saves them to a file for analysis.
