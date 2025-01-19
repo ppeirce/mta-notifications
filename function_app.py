@@ -1,9 +1,9 @@
 import azure.functions as func
 import logging
 import requests
-import json
 import os
 from datetime import datetime, timezone
+from azure.communication.email import EmailClient
 
 def get_alert_details(alert):
     """
@@ -62,7 +62,9 @@ def filter_seven_train_alerts(alerts_data):
         # each alert should have an array of 'informed_entity' objects
         informed_entities = alert.get('informed_entity', [])
 
-        # check each informed_entity for the 7 train sort_order
+        # check each informed_entity for the sort_order which defines the alert
+        # for "No [7] between Queensboro Plaza, Queens and 34 St-Hudson Yards, Manhattan"
+        # which is sort_order MTASBWY:7:20
         for informed_entity in informed_entities:
             # the sort order is nested inside mercury_entity_selector
             mercury_entity_selector = informed_entity.get('transit_realtime.mercury_entity_selector', {})
@@ -75,19 +77,96 @@ def filter_seven_train_alerts(alerts_data):
 
     return seven_train_alerts
 
+async def send_alert_email(email_client, alerts):
+    """
+    Sends an email notification about a service alert using Azure Communication Services.
+
+    This function creates a properly formatted email message using a dictionary structure
+    as specified by the Azure Communication Services SDK. The message includes both
+    plain text and HTML versions for better email client compatibility.
+    
+    Args:
+        email_client: The Azure Communication Services EmailClient
+        alert_header: The main alert message
+        alert_period: When the alert is active
+    """
+
+    sender = os.environ.get('EMAIL_SENDER')
+    recipient = os.environ.get('EMAIL_RECIPIENT')
+
+    if not alerts:
+        return
+
+    plain_text_alerts = []
+    html_alerts = []
+
+    for header, period in alerts:
+        # Add each alert to the plain text version
+        plain_text_alerts.extend([
+            f"Alert: {header}",
+            f"Active Period: {period}",
+            "-" * 50  # Add a separator between alerts
+        ])
+        
+        # Add each alert to the HTML version with proper formatting
+        html_alerts.append(f"""
+            <div style="margin-bottom: 20px;">
+                <p><strong>{header}</strong></p>
+                <p>Active Period: {period}</p>
+                <hr/>
+            </div>
+        """)
+
+    message = {
+        "content": {
+            "subject": f"7 Train Service Alert Summary - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "plainText": "\n".join(plain_text_alerts),
+            "html": f"""
+                <html>
+                    <body>
+                        <h2>7 Train Service Alerts</h2>
+                        <p>The following service changes are currently in effect:</p>
+                        {''.join(html_alerts)}
+                        <p>This message was automatically generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}</p>
+                    </body>
+                </html>
+            """
+        },
+        "recipients": {
+            "to": [
+                {
+                    "address": recipient,
+                    "displayName": "MTA Alert Subscriber"
+                }
+            ]
+        },
+        "senderAddress": sender
+    }
+
+    try:
+        poller = await email_client.begin_send(message)
+        result = poller.result()
+        logging.info(f"Email sent. Message Id: {result}")
+    except Exception as e:
+        logging.error(f"Failed to send email: {str(e)}")
+
 # Create a function app instance
 app = func.FunctionApp()
 
 # Register the function with the app
 @app.function_name(name="mta_alert_check")
-@app.schedule(schedule="0 */5 * * * *", arg_name="mytimer", run_on_startup=True)
-def mta_alert_check(mytimer: func.TimerRequest) -> None:
+@app.schedule(schedule="0 0 13 * * *", arg_name="mytimer", run_on_startup=True)
+# @app.schedule(schedule="0 * */1 * * *", arg_name="mytimer", run_on_startup=True)
+async def mta_alert_check(mytimer: func.TimerRequest) -> None:
     """
     Fetches MTA subway alerts and filters for alerts related to the 7 train.
     """
     # Log when our function starts
     utc_timestamp = datetime.now(timezone.utc).isoformat()
     logging.info('Alert check starting at: %s', utc_timestamp)
+
+    connection_string = os.environ["EMAIL_CONNECTION_STRING"]
+    email_client = EmailClient.from_connection_string(connection_string)
 
     try:
         # The MTA's public alerts API endpoint
@@ -101,12 +180,19 @@ def mta_alert_check(mytimer: func.TimerRequest) -> None:
         seven_train_alerts = filter_seven_train_alerts(alerts)
         logging.info(f'Found {len(seven_train_alerts)} alerts for the 7 train.')
 
+        alert_details = []
         for alert in seven_train_alerts:
             header_text, active_period = get_alert_details(alert)
             if header_text and active_period:
                 logging.info(f'Alert: {header_text}')
                 logging.info(f'Active Period: {active_period}')
                 logging.info('---')
+                alert_details.append((header_text, active_period))
+        
+        if alert_details:
+            alert_details.reverse()
+            await send_alert_email(email_client, alert_details)
+            logging.info('Summary email notification sent.')
         
         
     except requests.exceptions.RequestException as e:
